@@ -626,7 +626,8 @@ const Store = {
   },
   fallo(e){
     console.warn("db",e);
-    if(e && e.code==="invalid_argument") toast("Solo puedes ver: tu cuenta no tiene permiso para cambiar datos.");
+    if(e && (e.code==="42501"||/row-level security|permission/i.test(e.message||""))) toast("No tienes permiso para esto. Si eres del personal, inicia sesión.");
+    else if(e && e.code==="invalid_argument") toast("Solo puedes ver: tu cuenta no tiene permiso para cambiar datos.");
     else if(e && e.code==="quota_exceeded") toast("La base de datos está llena. Usa «Cerrar el día» en el panel para limpiar.");
     else toast("No se ha podido guardar. Revisa la conexión e inténtalo otra vez.");
   }
@@ -644,12 +645,15 @@ const SUPA_URL = "https://stktrcpberfnftqbhuye.supabase.co";
 const SUPA_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InN0a3RyY3BiZXJmbmZ0cWJodXllIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTM0NTU5NzUsImV4cCI6MjEwOTAzMTk3NX0.OgdRzPFMshoLGWkgP8pPMLx6cWBRJN61BLdCbRrVwdY";
 async function conectarSupabase(){
   if(!window.supabase || SUPA_URL.startsWith("__")) return false;
-  const sb=window.supabase.createClient(SUPA_URL,SUPA_KEY,{auth:{persistSession:false}});
+  const sb=window.supabase.createClient(SUPA_URL,SUPA_KEY,{auth:{persistSession:true,autoRefreshToken:true,storageKey:"lp-auth"}});
   Store.sb=sb;
+  try{ const {data}=await sb.auth.getSession(); Store.sesion=data.session||null; }catch(e){ Store.sesion=null; }
+  sb.auth.onAuthStateChange((ev,ses)=>{ const antes=!!Store.sesion; Store.sesion=ses||null; if(antes!==!!ses){ Store.recargar&&Store.recargar().catch(()=>{}); reiniciarVista(); } });
   const cargar=async()=>{ const m=Object.fromEntries(COLS.map(c=>[c,new Map()])); let desde=0;
     while(true){ const {data,error}=await sb.from("docs").select("col,id,data").range(desde,desde+999); if(error) throw error;
       data.forEach(r=>{ if(m[r.col]) m[r.col].set(r.id,r.data); }); if(data.length<1000) break; desde+=1000; }
     COLS.forEach(c=>Store.data[c]=m[c]); Store.emit(); };
+  Store.recargar=cargar;
   try{ await cargar(); }catch(e){ console.warn("supabase",e); toast("No se ha podido conectar con la base de datos. Funcionando en modo local."); return false; }
   Store.modo="supa"; Store.emit();
   sb.channel("docs").on("postgres_changes",{event:"*",schema:"public",table:"docs"},p=>{
@@ -657,6 +661,7 @@ async function conectarSupabase(){
     const r=p.new; if(r && Store.data[r.col]){ Store.data[r.col].set(r.id,r.data); Store.emit(); }
   }).subscribe(st=>{ if(st==="CHANNEL_ERROR"||st==="TIMED_OUT") toast("Conexión en vivo interrumpida. Reintentando…"); if(st==="SUBSCRIBED" && Store._resync){ cargar().catch(()=>{}); } Store._resync=true; });
   document.addEventListener("visibilitychange",()=>{ if(document.visibilityState==="visible") cargar().catch(()=>{}); });
+  reiniciarVista();
   return true;
 }
 async function conectarDB(){
@@ -922,13 +927,18 @@ function ruta(){
   if(h==="panel") return {v:"panel"};
   return {v:"inicio"};
 }
+const esPersonal = r => ["camarero","kds","panel"].includes(r.v);
+const necesitaLogin = r => esPersonal(r) && Store.modo==="supa" && !Store.sesion;
+function reiniciarVista(){ if(vista && vista.salir) vista.salir(); vista=null; ir(); }
 function ir(){
-  const r=ruta(), clave=JSON.stringify(r);
+  let r=ruta();
+  if(necesitaLogin(r)) r={v:"login",destino:r.v};
+  const clave=JSON.stringify(r);
   if(vista && vista.clave===clave) return;
   vista && vista.salir && vista.salir();
   document.documentElement.classList.toggle("staff", r.v==="camarero"||r.v==="panel");
   window.scrollTo(0,0);
-  const V={inicio:VInicio,carta:VCarta,mesa:VMesa,llevar:VLlevar,seguir:VSeguir,recogida:VRecogida,camarero:VCamarero,kds:VKds,panel:VPanel}[r.v];
+  const V={login:VLogin,inicio:VInicio,carta:VCarta,mesa:VMesa,llevar:VLlevar,seguir:VSeguir,recogida:VRecogida,camarero:VCamarero,kds:VKds,panel:VPanel}[r.v];
   vista=V(r); vista.clave=clave; document.title=vista.titulo||cfgBar().nombre; vista.pintar();
 }
 addEventListener("hashchange",ir);
@@ -1002,6 +1012,42 @@ function clicCarrito(t, st){
   if(t.closest("[data-add-menu]")){ const k=`menu~${st.msel.a}~${st.msel.b}~${st.msel.c}`; st.carrito[k]=(st.carrito[k]||0)+1; st.hoja=null; st.cat="menu"; return "pintar"; }
   return false;
 }
+
+/* =====================================================================
+   VISTA: ACCESO DEL PERSONAL
+   ===================================================================== */
+function VLogin({destino}){
+  let enviando=false, error="";
+  const nombres={camarero:"Camareros",kds:"Cocina y barra",panel:"Panel del bar"};
+  function pintar(){
+    app.innerHTML=`<div class="app-mesa" style="justify-content:center"><div class="m-cuerpo" style="max-width:420px;margin:0 auto;width:100%;align-content:center">
+      <img src="logo.png" alt="${esc(cfgBar().nombre)}" style="width:70%;max-width:280px;margin:0 auto;display:block">
+      <p class="m-hola" style="text-align:center">Acceso del personal</p>
+      <p class="m-texto" style="text-align:center">${nombres[destino]||"Personal"}. Entra con la cuenta del bar; en este dispositivo solo hace falta una vez.</p>
+      <form id="f-login" class="form-ll" autocomplete="on">
+        <label>Correo<input id="lg-email" type="email" autocomplete="username" required></label>
+        <label>Contraseña<input id="lg-pass" type="password" autocomplete="current-password" required></label>
+        ${error?`<p style="margin:0;color:var(--critico);font-size:16px" role="alert">${esc(error)}</p>`:""}
+        <button class="btn rojo" type="submit" ${enviando?"disabled":""}>${enviando?"Entrando…":"Entrar"}</button>
+      </form>
+      <a class="btn peq" href="#inicio" style="justify-self:center">${ico("back")}Volver</a>
+      <p class="m-texto" style="font-size:14px;text-align:center">¿No tienes cuenta? Pídesela al encargado: se crean desde Supabase.</p>
+    </div></div>`;
+  }
+  async function enviar(e){
+    if(e.target.id!=="f-login") return; e.preventDefault();
+    const email=app.querySelector("#lg-email").value.trim(), pass=app.querySelector("#lg-pass").value;
+    enviando=true; error=""; pintar(); app.querySelector("#lg-email").value=email;
+    const {error:err}=await Store.sb.auth.signInWithPassword({email,password:pass});
+    enviando=false;
+    if(err){ error=/invalid/i.test(err.message)?"Correo o contraseña incorrectos.":"No se ha podido entrar: "+err.message; pintar(); app.querySelector("#lg-email").value=email; return; }
+    toast("Sesión iniciada en este dispositivo.");
+  }
+  app.addEventListener("submit",enviar);
+  return { titulo:"Acceso del personal · "+cfgBar().nombre, pintar, alCambiar(){}, salir(){ app.removeEventListener("submit",enviar); } };
+}
+async function cerrarSesion(){ if(Store.sb){ await Store.sb.auth.signOut(); toast("Sesión cerrada en este dispositivo."); } }
+document.addEventListener("click",e=>{ if(e.target.closest("[data-salir]")) cerrarSesion(); });
 
 /* =====================================================================
    VISTA: INICIO
@@ -1296,7 +1342,7 @@ function VCamarero(){
         <div class="c-fila"><h1>${esc(cfgBar().nombre.toUpperCase().replace(/^BAR /,""))} <span>· camareros</span></h1>${modoBadge()}</div>
         <div class="c-fila"><label class="oculto" for="yo">Soy</label><select class="c-sel" id="yo">${cams().map(c=>`<option value="${c.id}" ${c.id===yo?"selected":""}>${esc(c.n)}${t.activos[c.id]===false?" (libra)":""}</option>`).join("")}</select>
           <span style="font-size:13px;color:#cfc4b1;flex:1">Mesas ${misM.length?resumirMesas(misM):"—"}</span>
-          <button class="sonido" data-sonido aria-pressed="${sonidoOn()}">${ico("speaker")}${sonidoOn()?"Sonido":"Sin sonido"}</button></div>
+          <button class="sonido" data-sonido aria-pressed="${sonidoOn()}">${ico("speaker")}${sonidoOn()?"Sonido":"Sin sonido"}</button>${Store.sesion?`<button class="sonido" data-salir>Salir</button>`:""}</div>
         <div class="seg" role="group" aria-label="Vista"><button data-sub="avisos" aria-pressed="${sub==="avisos"}">Avisos${av.length?`<span class="b">${av.length}</span>`:""}</button><button data-sub="mesas" aria-pressed="${sub==="mesas"}">Mis mesas</button><button data-sub="todas" aria-pressed="${sub==="todas"}">Sala</button></div>
       </div>
       <div class="c-cuerpo">
@@ -1570,7 +1616,7 @@ function VPanel(){
     const cuerpo={sala,resumen:resumenV,informe,carta:cartaV,menu:menuV,turno:turnoV,nfc:nfcV,ajustes:ajustesV}[panelTab]();
     app.innerHTML=`<div class="panel"><aside class="p-side"><div class="marca"><b>${esc(cfgBar().nombre.toUpperCase().replace(/^BAR /,""))}</b><span>panel del bar</span></div>
       <nav aria-label="Secciones del panel">${tabs.map(([k,t,i])=>`<button data-tab="${k}" aria-current="${panelTab===k?"page":"false"}">${ico(i)}${t}</button>`).join("")}</nav>
-      <div class="abajo"><a href="#inicio">← Todas las pantallas</a><button class="b-ui claro" data-cerrar-dia style="font-size:13px">Cerrar el día</button><button class="b-ui claro" data-reiniciar style="font-size:13px">Borrar datos de prueba</button></div></aside>
+      <div class="abajo"><a href="#inicio">← Todas las pantallas</a>${Store.sesion?`<button class="b-ui claro" data-salir style="font-size:13px">Cerrar sesión (${esc(Store.sesion.user.email)})</button>`:""}<button class="b-ui claro" data-cerrar-dia style="font-size:13px">Cerrar el día</button><button class="b-ui claro" data-reiniciar style="font-size:13px">Borrar datos de prueba</button></div></aside>
       <main class="p-main">${cuerpo}</main>${hoja?hojaMesaHTML(hoja,"panel"):""}</div>`;
     app.querySelectorAll(".graf").forEach(tip);
     const bc=app.querySelector("#bc"); if(bc) bc.addEventListener("input",()=>{ buscar=bc.value; const pos=bc.selectionStart; pintar(true); const n=app.querySelector("#bc"); n.focus(); n.setSelectionRange(pos,pos); });
