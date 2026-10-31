@@ -641,7 +641,7 @@ const Local = {
 Local.cargar();
 // Base de datos propia (Supabase). Las claves "anon" son públicas por diseño: la seguridad va en las reglas de la tabla.
 const SUPA_URL = "https://stktrcpberfnftqbhuye.supabase.co";
-const SUPA_KEY = "__SUPA_KEY__";
+const SUPA_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InN0a3RyY3BiZXJmbmZ0cWJodXllIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTM0NTU5NzUsImV4cCI6MjEwOTAzMTk3NX0.OgdRzPFMshoLGWkgP8pPMLx6cWBRJN61BLdCbRrVwdY";
 async function conectarSupabase(){
   if(!window.supabase || SUPA_URL.startsWith("__")) return false;
   const sb=window.supabase.createClient(SUPA_URL,SUPA_KEY,{auth:{persistSession:false}});
